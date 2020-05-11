@@ -2,7 +2,7 @@ import torch as th
 import syft as sy
 
 from syft.generic.pointers.pointer_plan import PointerPlan
-from syft.messaging.plan import Plan
+from syft.execution.plan import Plan
 
 
 def test_create_pointer_to_plan(hook, workers):
@@ -12,7 +12,7 @@ def test_create_pointer_to_plan(hook, workers):
 
     @sy.func2plan(args_shape=[(1,)], state=(th.tensor([1.0]),))
     def plan(x, state):
-        bias, = state.read()
+        (bias,) = state.read()
         return x + bias
 
     plan.send(alice)
@@ -36,7 +36,7 @@ def test_search_plan(hook, workers):
 
     @sy.func2plan(args_shape=[(1,)], state=(th.tensor([1.0]),))
     def plan(x, state):
-        bias, = state.read()
+        (bias,) = state.read()
         return x + bias
 
     plan.send(alice)
@@ -60,7 +60,7 @@ def test_get_plan(workers):
 
     @sy.func2plan(args_shape=[(1,)], state=(th.tensor([1.0]),))
     def plan(x, state):
-        bias, = state.read()
+        (bias,) = state.read()
         return x + bias
 
     plan.send(alice)
@@ -75,5 +75,34 @@ def test_get_plan(workers):
     res = plan(x)
 
     assert (res == th.tensor([2.0])).all()
+
+    me.is_client_worker = True
+
+
+def test_pointer_plan_parameters(workers):
+    bob, me = workers["bob"], workers["me"]
+
+    me.is_client_worker = False
+
+    class Net(sy.Plan):
+        def __init__(self):
+            super(Net, self).__init__()
+            self.fc1 = th.nn.Linear(2, 1)
+
+        def forward(self, x):
+            x = self.fc1(x)
+            return x
+
+    model = Net()
+    model.build(th.tensor([[0.0, 0.0]]))
+    model = model.send(bob)
+
+    param_ptrs = model.parameters()
+
+    assert len(param_ptrs) == 2
+
+    for param_ptr in param_ptrs:
+        assert param_ptr.is_wrapper
+        assert isinstance(param_ptr.child, sy.PointerTensor)
 
     me.is_client_worker = True

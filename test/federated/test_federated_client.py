@@ -6,12 +6,12 @@ import syft as sy
 from syft.federated.federated_client import FederatedClient
 from syft.federated.train_config import TrainConfig
 from syft.generic.pointers.object_wrapper import ObjectWrapper
-from syft.frameworks.torch.federated import utils
+from syft.frameworks.torch.fl import utils
 
 PRINT_IN_UNITTESTS = False
 
 # To make execution deterministic to some extent
-# for more information - refer https://pytorch.org/docs/stable/notes/randomness.html
+# For more information - refer https://pytorch.org/docs/stable/notes/randomness.html
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 torch.backends.cudnn.benchmark = False
@@ -19,35 +19,43 @@ torch.backends.cudnn.deterministic = True
 
 
 def test_add_dataset():
+    # Create a client to execute federated learning
     fed_client = FederatedClient()
-
+    # Create a dataset
     dataset = "my_dataset"
-    fed_client.add_dataset(dataset, "string_dataset")
+    key = "string_dataset"
+    # Add new dataset
+    fed_client.add_dataset(dataset, key)
 
     assert "string_dataset" in fed_client.datasets
 
 
 def test_add_dataset_with_duplicate_key():
+    # Create a client to execute federated learning
     fed_client = FederatedClient()
-
+    # Create a dataset
     dataset = "my_dataset"
-    fed_client.add_dataset(dataset, "string_dataset")
+    key = "string_dataset"
+    # Add new dataset
+    fed_client.add_dataset(dataset, key)
 
     assert "string_dataset" in fed_client.datasets
-
+    # Raise an error if the key is already exists
     with pytest.raises(ValueError):
         fed_client.add_dataset(dataset, "string_dataset")
 
 
 def test_remove_dataset():
+    # Create a client to execute federated learning
     fed_client = FederatedClient()
-
+    # Create a dataset
     dataset = "my_dataset"
     key = "string_dataset"
+    # Add new dataset
     fed_client.add_dataset(dataset, key)
 
     assert key in fed_client.datasets
-
+    # Remove new dataset
     fed_client.remove_dataset(key)
 
     assert key not in fed_client.datasets
@@ -84,24 +92,35 @@ def evaluate_model(fed_client, model_id, loss_fn, data, target):  # pragma: no c
     return loss_after
 
 
-def train_model(fed_client, fit_dataset_key, available_dataset_key, nr_rounds):  # pragma: no cover
+def train_model(
+    fed_client, fit_dataset_key, available_dataset_key, nr_rounds, device
+):  # pragma: no cover
     loss = None
     for curr_round in range(nr_rounds):
         if fit_dataset_key == available_dataset_key:
-            loss = fed_client.fit(dataset_key=fit_dataset_key)
+            loss = fed_client.fit(dataset_key=fit_dataset_key, device=device)
         else:
             with pytest.raises(ValueError):
-                loss = fed_client.fit(dataset_key=fit_dataset_key)
+                loss = fed_client.fit(dataset_key=fit_dataset_key, device=device)
         if PRINT_IN_UNITTESTS and curr_round % 2 == 0:  # pragma: no cover
             print("-" * 50)
-            print("Iteration %s: alice's loss: %s" % (curr_round, loss))
+            print(f"Iteration {curr_round}: alice's loss: {loss}")
 
 
 @pytest.mark.parametrize(
-    "fit_dataset_key, epochs",
-    [("gaussian_mixture", 1), ("gaussian_mixture", 10), ("another_dataset", 1)],
+    "fit_dataset_key, epochs, device",
+    [
+        ("gaussian_mixture", 1, "cpu"),
+        ("gaussian_mixture", 10, "cpu"),
+        ("another_dataset", 1, "cpu"),
+        ("gaussian_mixture", 10, "cuda"),
+    ],
 )
-def test_fit(fit_dataset_key, epochs):
+def test_fit(fit_dataset_key, epochs, device):
+
+    if device == "cuda" and not torch.cuda.is_available():
+        return
+
     data, target = utils.create_gaussian_mixture_toy_data(nr_samples=100)
 
     fed_client = FederatedClient()
@@ -126,16 +145,18 @@ def test_fit(fit_dataset_key, epochs):
             x = torch.nn.functional.relu(self.fc2(x))
             return x
 
-    model_untraced = Net()
-    model = torch.jit.trace(model_untraced, data)
+    data_device = data.to(torch.device(device))
+    target_device = target.to(torch.device(device))
+    model_untraced = Net().to(torch.device(device))
+    model = torch.jit.trace(model_untraced, data_device)
     model_id = 0
     model_ow = ObjectWrapper(obj=model, id=model_id)
     loss_id = 1
     loss_ow = ObjectWrapper(obj=loss_fn, id=loss_id)
-    pred = model(data)
-    loss_before = loss_fn(target=target, pred=pred)
+    pred = model(data_device)
+    loss_before = loss_fn(target=target_device, pred=pred)
     if PRINT_IN_UNITTESTS:  # pragma: no cover
-        print("Loss before training: {}".format(loss_before))
+        print(f"Loss before training: {loss_before}")
 
     # Create and send train config
     train_config = sy.TrainConfig(
@@ -153,29 +174,31 @@ def test_fit(fit_dataset_key, epochs):
     fed_client.set_obj(train_config)
     fed_client.optimizer = None
 
-    train_model(fed_client, fit_dataset_key, available_dataset_key=dataset_key, nr_rounds=3)
+    train_model(
+        fed_client, fit_dataset_key, available_dataset_key=dataset_key, nr_rounds=3, device=device
+    )
 
     if dataset_key == fit_dataset_key:
-        loss_after = evaluate_model(fed_client, model_id, loss_fn, data, target)
+        loss_after = evaluate_model(fed_client, model_id, loss_fn, data_device, target_device)
         if PRINT_IN_UNITTESTS:  # pragma: no cover
-            print("Loss after training: {}".format(loss_after))
+            print(f"Loss after training: {loss_after}")
 
         if loss_after >= loss_before:  # pragma: no cover
             if PRINT_IN_UNITTESTS:
-                print("Loss not reduced, train more: {}".format(loss_after))
+                print(f"Loss not reduced, train more: {loss_after}")
 
             train_model(
-                fed_client, fit_dataset_key, available_dataset_key=dataset_key, nr_rounds=10
+                fed_client,
+                fit_dataset_key,
+                available_dataset_key=dataset_key,
+                nr_rounds=10,
+                device=device,
             )
             loss_after = evaluate_model(fed_client, model_id, loss_fn, data, target)
 
         assert loss_after < loss_before
 
 
-@pytest.mark.skipif(
-    torch.__version__ >= "1.1",
-    reason="bug in pytorch version 1.1.0, jit.trace returns raw C function",
-)
 def test_evaluate():  # pragma: no cover
     data, target = utils.iris_data_partial()
 
@@ -218,7 +241,7 @@ def test_evaluate():  # pragma: no cover
     pred = model(data)
     loss_before = loss_fn(target=target, pred=pred)
     if PRINT_IN_UNITTESTS:  # pragma: no cover
-        print("Loss before training: {}".format(loss_before))
+        print(f"Loss before training: {loss_before}")
 
     # Create and send train config
     train_config = sy.TrainConfig(
@@ -247,7 +270,7 @@ def test_evaluate():  # pragma: no cover
     hist_target = result["histogram_target"]
 
     if PRINT_IN_UNITTESTS:  # pragma: no cover
-        print("Evaluation result before training: {}".format(result))
+        print(f"Evaluation result before training: {result}")
 
     assert len_dataset == 30
     assert (hist_target == [10, 10, 10]).all()
@@ -264,7 +287,9 @@ def test_evaluate():  # pragma: no cover
         epochs=2,
     )
     fed_client.set_obj(train_config)
-    train_model(fed_client, dataset_key, available_dataset_key=dataset_key, nr_rounds=50)
+    train_model(
+        fed_client, dataset_key, available_dataset_key=dataset_key, nr_rounds=50, device="cpu"
+    )
 
     result = fed_client.evaluate(
         dataset_key=dataset_key, return_histograms=True, nr_bins=3, return_loss=True
@@ -277,7 +302,7 @@ def test_evaluate():  # pragma: no cover
     hist_target = result["histogram_target"]
 
     if PRINT_IN_UNITTESTS:  # pragma: no cover
-        print("Evaluation result: {}".format(result))
+        print(f"Evaluation result: {result}")
 
     assert len_dataset == 30
     assert (hist_target == [10, 10, 10]).all()

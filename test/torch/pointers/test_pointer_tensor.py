@@ -2,17 +2,19 @@ import torch
 import torch as th
 import syft
 
+from syft.frameworks.torch.tensors.interpreters.additive_shared import AdditiveSharingTensor
 from syft.frameworks.torch.tensors.interpreters.precision import FixedPrecisionTensor
 from syft.generic.pointers.pointer_tensor import PointerTensor
 import pytest
 
 
 def test_init(workers):
-    pointer = PointerTensor(id=1000, location=workers["alice"], owner=workers["me"])
+    alice, me = workers["alice"], workers["me"]
+    pointer = PointerTensor(id=1000, location=alice, owner=me)
     pointer.__str__()
 
 
-def test_create_pointer(workers):
+def test_create_pointer():
     x = torch.Tensor([1, 2])
     x.create_pointer()
 
@@ -22,8 +24,10 @@ def test_send_default_garbage_collector_true(workers):
     Remote tensor should be garbage collected by default on
     deletion of the Pointer tensor pointing to remote tensor
     """
+    alice = workers["alice"]
+
     x = torch.Tensor([-1, 2])
-    x_ptr = x.send(workers["alice"])
+    x_ptr = x.send(alice)
     assert x_ptr.child.garbage_collect_data
 
 
@@ -32,8 +36,10 @@ def test_send_garbage_collect_data_false(workers):
     Remote tensor should be not garbage collected on
     deletion of the Pointer tensor pointing to remote tensor
     """
+    alice = workers["alice"]
+
     x = torch.Tensor([-1, 2])
-    x_ptr = x.send(workers["alice"])
+    x_ptr = x.send(alice)
     x_ptr.garbage_collection = False
     assert x_ptr.child.garbage_collect_data == False
 
@@ -42,9 +48,10 @@ def test_send_gc_false(workers):
     """
     Remote tensor should be not garbage collected on
     deletion of the Pointer tensor pointing to remote tensor
-     """
+    """
+    alice = workers["alice"]
     x = torch.Tensor([-1, 2])
-    x_ptr = x.send(workers["alice"])
+    x_ptr = x.send(alice)
     x_ptr.gc = False
     assert x_ptr.child.garbage_collect_data == False
     assert x_ptr.gc == False, "property GC is not in sync"
@@ -56,16 +63,20 @@ def test_send_gc_true(workers):
     Remote tensor by default is garbage collected on
     deletion of Pointer Tensor
     """
+    alice = workers["alice"]
+
     x = torch.Tensor([-1, 2])
-    x_ptr = x.send(workers["alice"])
+    x_ptr = x.send(alice)
 
     assert x_ptr.gc == True
 
 
 def test_send_disable_gc(workers):
     """Pointer tensor should be not garbage collected."""
+    alice = workers["alice"]
+
     x = torch.Tensor([-1, 2])
-    x_ptr = x.send(workers["alice"]).disable_gc
+    x_ptr = x.send(alice).disable_gc
     assert x_ptr.child.garbage_collect_data == False
     assert x_ptr.gc == False, "property GC is not in sync"
     assert x_ptr.garbage_collection == False, "property garbage_collection is not in sync"
@@ -112,8 +123,10 @@ def test_send_get(workers):
 
 
 def test_inplace_send_get(workers):
+    bob = workers["bob"]
+
     tensor = torch.tensor([1.0, -1.0, 3.0, 4.0])
-    tensor_ptr = tensor.send_(workers["bob"])
+    tensor_ptr = tensor.send_(bob)
 
     assert tensor_ptr.id == tensor.id
     assert id(tensor_ptr) == id(tensor)
@@ -134,23 +147,26 @@ def test_repeated_send(workers):
     when .send() was called twice. This test ensures the fix still
     works."""
 
+    bob = workers["bob"]
+
     # create tensor
     x = torch.Tensor([1, 2])
-    print(x.id)
 
     # send tensor to bob
-    x_ptr = x.send(workers["bob"])
+    x_ptr = x.send(bob)
 
     # send tensor again
-    x_ptr = x.send(workers["bob"])
+    x_ptr = x.send(bob)
 
     # ensure bob has tensor
-    assert x.id in workers["bob"]._objects
+    assert x.id in bob._objects
 
 
 def test_remote_autograd(workers):
     """Tests the ability to backpropagate gradients on a remote
     worker."""
+
+    bob = workers["bob"]
 
     # TEST: simple remote grad calculation
 
@@ -158,7 +174,7 @@ def test_remote_autograd(workers):
     x = torch.tensor([1, 2, 3, 4.0], requires_grad=True)
 
     # send tensor to bob
-    x = x.send(workers["bob"])
+    x = x.send(bob)
 
     # do some calculation
     y = (x + x).sum()
@@ -167,14 +183,14 @@ def test_remote_autograd(workers):
     y.backward()
 
     # check that remote gradient is correct
-    x_grad = workers["bob"]._objects[x.id_at_location].grad
+    x_grad = bob._objects[x.id_at_location].grad
     x_grad_target = torch.ones(4).float() + 1
     assert (x_grad == x_grad_target).all()
 
     # TEST: Ensure remote grad calculation gets properly serded
 
     # create tensor
-    x = torch.tensor([1, 2, 3, 4.0], requires_grad=True).send(workers["bob"])
+    x = torch.tensor([1, 2, 3, 4.0], requires_grad=True).send(bob)
 
     # compute function
     y = x.sum()
@@ -183,7 +199,7 @@ def test_remote_autograd(workers):
     y.backward()
 
     # get the gradient created from backpropagation manually
-    x_grad = workers["bob"]._objects[x.id_at_location].grad
+    x_grad = bob._objects[x.id_at_location].grad
 
     # get the entire x tensor (should bring the grad too)
     x = x.get()
@@ -196,17 +212,19 @@ def test_gradient_send_recv(workers):
     """Tests that gradients are properly sent and received along
     with their tensors."""
 
+    bob = workers["bob"]
+
     # create a tensor
     x = torch.tensor([1, 2, 3, 4.0], requires_grad=True)
 
     # create gradient on tensor
-    x.sum().backward(torch.ones(1))
+    x.sum().backward(th.tensor(1.0))
 
     # save gradient
     orig_grad = x.grad
 
     # send and get back
-    t = x.send(workers["bob"]).get()
+    t = x.send(bob).get()
 
     # check that gradient was properly serde
     assert (t.grad == orig_grad).all()
@@ -214,9 +232,11 @@ def test_gradient_send_recv(workers):
 
 def test_method_on_attribute(workers):
 
+    bob = workers["bob"]
+
     # create remote object with children
     x = torch.Tensor([1, 2, 3])
-    x = syft.LoggingTensor().on(x).send(workers["bob"])
+    x = syft.LoggingTensor().on(x).send(bob)
 
     # call method on data tensor directly
     x.child.point_to_attr = "child.child"
@@ -260,14 +280,14 @@ def test_grad_pointer(workers):
 
 
 def test_move(workers):
-    alice, bob, james = workers["alice"], workers["bob"], workers["james"]
+    alice, bob, james, me = workers["alice"], workers["bob"], workers["james"], workers["me"]
 
     x = torch.tensor([1, 2, 3, 4, 5]).send(bob)
 
     assert x.id_at_location in bob._objects
     assert x.id_at_location not in alice._objects
 
-    x.move(alice)
+    p = x.move(alice)
 
     assert x.id_at_location not in bob._objects
     assert x.id_at_location in alice._objects
@@ -277,7 +297,7 @@ def test_move(workers):
     assert x.id_at_location in bob._objects
     assert x.id_at_location not in alice._objects
 
-    x.move(alice)
+    p = x.move(alice)
 
     assert x.id_at_location not in bob._objects
     assert x.id_at_location in alice._objects
@@ -285,9 +305,9 @@ def test_move(workers):
     alice.clear_objects()
     bob.clear_objects()
     x = torch.tensor([1.0, 2, 3, 4, 5]).send(bob)
-    x.move(alice)
+    p = x.move(alice)
 
-    assert len(alice._objects) == 1
+    assert len(alice._tensors) == 1
 
     # Test .move on remote objects
 
@@ -298,6 +318,16 @@ def test_move(workers):
     assert remote_ptr.id in james._objects.keys()
     remote_ptr2 = remote_ptr.move(alice)
     assert remote_ptr2.id in james._objects.keys()
+
+    # Test .move back to myself
+
+    alice.clear_objects()
+    bob.clear_objects()
+    t = torch.tensor([1.0, 2, 3, 4, 5])
+    x = t.send(bob)
+    y = x.move(alice)
+    z = y.move(me)
+    assert (z == t).all()
 
 
 def test_combine_pointers(workers):
@@ -372,17 +402,23 @@ def test_raising_error_when_item_func_called(workers):
 def test_fix_prec_on_pointer_tensor(workers):
     """
     Ensure .fix_precision() works as expected.
+    Also check that fix_precision() is not inplace.
     """
     bob = workers["bob"]
 
     tensor = torch.tensor([1, 2, 3, 4.0])
     ptr = tensor.send(bob)
 
-    ptr = ptr.fix_precision()
+    ptr_fp = ptr.fix_precision()
+
     remote_tensor = bob._objects[ptr.id_at_location]
+    remote_fp_tensor = bob._objects[ptr_fp.id_at_location]
+
+    # check that fix_precision is not inplace
+    assert (remote_tensor == tensor).all()
 
     assert isinstance(ptr.child, PointerTensor)
-    assert isinstance(remote_tensor.child, FixedPrecisionTensor)
+    assert isinstance(remote_fp_tensor.child, FixedPrecisionTensor)
 
 
 def test_fix_prec_on_pointer_of_pointer(workers):
@@ -441,3 +477,95 @@ def test_float_prec_on_pointer_of_pointer(workers):
 
     assert isinstance(ptr.child, PointerTensor)
     assert isinstance(remote_tensor, torch.Tensor)
+
+
+def test_share_get(workers):
+    """
+    Ensure .share() works as expected.
+    """
+    bob = workers["bob"]
+    alice = workers["alice"]
+    charlie = workers["charlie"]
+
+    tensor = torch.tensor([1, 2, 3])
+    ptr = tensor.send(bob)
+
+    ptr = ptr.share(charlie, alice)
+    remote_tensor = bob._objects[ptr.id_at_location]
+
+    assert isinstance(ptr.child, PointerTensor)
+    assert isinstance(remote_tensor.child, AdditiveSharingTensor)
+
+
+def test_registration_of_action_on_pointer_of_pointer(workers):
+    """
+    Ensure actions along a chain of pointers are registered as expected.
+    """
+    bob = workers["bob"]
+    alice = workers["alice"]
+
+    tensor = torch.tensor([1, 2, 3, 4.0])
+    ptr = tensor.send(bob)
+    ptr = ptr.send(alice)
+    ptr_action = ptr + ptr
+
+    assert len(alice._tensors) == 2
+    assert len(bob._tensors) == 2
+
+
+def test_setting_back_grad_to_origin_after_send(workers):
+    """
+    Calling .backward() on a tensor sent using `.send(..., requires_grad=True)`
+    should update the origin tensor gradient
+    """
+    me = workers["me"]
+    alice = workers["alice"]
+
+    with me.registration_enabled():
+        x = th.tensor([1.0, 2.0, 3, 4, 5], requires_grad=True)
+        y = x + x
+        me.register_obj(y)  # registration on the local worker is sometimes buggy
+
+        y_ptr = y.send(alice, requires_grad=True)
+        z_ptr = y_ptr * 2
+
+        z = z_ptr.sum()
+        z.backward()
+
+        assert (x.grad == th.tensor([4.0, 4.0, 4.0, 4.0, 4.0])).all()
+
+
+def test_setting_back_grad_to_origin_after_move(workers):
+    """
+    Calling .backward() on a tensor moved using `.move(..., requires_grad=True)`
+    should update the origin tensor gradient
+    """
+    me = workers["me"]
+    bob = workers["bob"]
+    alice = workers["alice"]
+
+    with me.registration_enabled():
+        x = th.tensor([1.0, 2.0, 3, 4, 5], requires_grad=True)
+        y = x + x
+        me.register_obj(y)  # registration on the local worker is sometimes buggy
+
+        y_ptr = y.send(alice, requires_grad=True)
+        z_ptr = y_ptr * 2
+
+        z_ptr2 = z_ptr.move(bob, requires_grad=True)
+        z = z_ptr2.sum()
+        z.backward()
+
+        assert (x.grad == th.tensor([4.0, 4.0, 4.0, 4.0, 4.0])).all()
+
+
+def test_iadd(workers):
+    alice = workers["alice"]
+    a = torch.ones(1, 5)
+    b = torch.ones(1, 5)
+    a_pt = a.send(alice)
+    b_pt = b.send(alice)
+
+    b_pt += a_pt
+
+    assert len(alice._objects) == 8

@@ -68,7 +68,7 @@ def test_create_already_existing_worker_with_different_type(hook, start_proc):
     server.terminate()
 
 
-def test_execute_command_self(hook):
+def test_execute_worker_function(hook):
     sy.VirtualWorker.mocked_function = MethodType(
         mock.Mock(return_value="bob_mocked_function"), sy.VirtualWorker
     )
@@ -76,7 +76,7 @@ def test_execute_command_self(hook):
     bob = sy.VirtualWorker(hook, "bob")
     x = th.tensor([1, 2, 3]).send(bob)
 
-    message = bob.create_message_execute_command(
+    message = bob.create_worker_command_message(
         command_name="mocked_function", command_owner="self"
     )
 
@@ -88,3 +88,39 @@ def test_execute_command_self(hook):
     assert response == "bob_mocked_function"
 
     bob.mocked_function.assert_called()
+
+
+def test_enable_registration_with_ctx(hook):
+    assert hook.local_worker.is_client_worker == True
+    with hook.local_worker.registration_enabled():
+        hook.local_worker.is_client_worker == False
+    assert hook.local_worker.is_client_worker == True
+
+
+def test_send_command_whitelist(hook, workers):
+    bob = workers["bob"]
+    whitelisted_methods = {
+        "torch": {"tensor": [1, 2, 3], "rand": (2, 3), "randn": (2, 3), "zeros": (2, 3)}
+    }
+
+    for framework, methods in whitelisted_methods.items():
+        attr = getattr(bob.remote, framework)
+
+        for method, inp in methods.items():
+            x = getattr(attr, method)(inp)
+
+            if "rand" not in method:
+                assert (x.get() == getattr(th, method)(inp)).all()
+
+
+def test_send_command_not_whitelisted(hook, workers):
+    bob = workers["bob"]
+
+    method_not_exist = "openmind"
+
+    for framework in bob.remote.frameworks:
+        if framework in dir(bob.remote):
+            attr = getattr(bob.remote, framework)
+
+            with pytest.raises(AttributeError):
+                getattr(attr, method_not_exist)

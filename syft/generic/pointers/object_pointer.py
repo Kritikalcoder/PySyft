@@ -13,6 +13,7 @@ from syft.generic.frameworks.hook import hook_args
 from syft.generic.frameworks.types import FrameworkTensor
 from syft.generic.object import AbstractObject
 from syft.messaging.message import ForceObjectDeleteMessage
+from syft.workers.abstract import AbstractWorker
 
 from syft.exceptions import RemoteObjectFoundError
 
@@ -198,7 +199,7 @@ class ObjectPointer(AbstractObject):
         Get the remote location to send the command, send it and get a
         pointer to the response, return.
         :param command: instruction of a function command: (command name,
-        None, arguments[, kwargs])
+        None, arguments[, kwargs_])
         :return: the response of the function command
         """
         pointer = cls.find_a_pointer(command)
@@ -206,25 +207,27 @@ class ObjectPointer(AbstractObject):
         owner = pointer.owner
         location = pointer.location
 
+        cmd, _, args_, kwargs_ = command
+
         # Send the command
-        response = owner.send_command(location, command)
+        response = owner.send_command(location, cmd_name=cmd, args_=args_, kwargs_=kwargs_)
 
         return response
 
     @classmethod
     def find_a_pointer(cls, command):
         """
-        Find and return the first pointer in the args object, using a trick
+        Find and return the first pointer in the args_ object, using a trick
         with the raising error RemoteObjectFoundError
         """
         try:
-            cmd, _, args, kwargs = command
-            _ = hook_args.unwrap_args_from_function(cmd, args, kwargs)
+            cmd, _, args_, kwargs_ = command
+            _ = hook_args.unwrap_args_from_function(cmd, args_, kwargs_)
         except exceptions.RemoteObjectFoundError as err:
             pointer = err.pointer
             return pointer
 
-    def get(self, deregister_ptr: bool = True):
+    def get(self, user=None, reason: str = "", deregister_ptr: bool = True):
         """Requests the object being pointed to.
 
         The object to which the pointer points will be requested, serialized and returned.
@@ -234,6 +237,8 @@ class ObjectPointer(AbstractObject):
             removed/destroyed.
 
         Args:
+            user (obj, optional) : authenticate/allow user to perform get on remote private objects.
+            reason (str, optional) : a description of why the data scientist wants to see it.
             deregister_ptr (bool, optional): this determines whether to
                 deregister this pointer from the pointer's owner during this
                 method. This defaults to True because the main reason people use
@@ -263,7 +268,7 @@ class ObjectPointer(AbstractObject):
                 obj = obj.child
         else:
             # get tensor from location
-            obj = self.owner.request_obj(self.id_at_location, self.location)
+            obj = self.owner.request_obj(self.id_at_location, self.location, user, reason)
 
         # Remove this pointer by default
         if deregister_ptr:
@@ -340,9 +345,26 @@ class ObjectPointer(AbstractObject):
             if self.point_to_attr is None:
                 self.owner.send_msg(ForceObjectDeleteMessage(self.id_at_location), self.location)
 
+    def force_delete(self):
+        """Forcing to delete the object pointed to by this pointer. By default,
+        PySyft assumes that every object only has one pointer to it. Thus, if
+        the pointer gets garbage collected, we want to automatically garbage
+        collect the object being pointed to.
+        """
+
+        # if .get() gets called on the pointer before this method is called, then
+        # the remote object has already been removed. This results in an error on
+        # this next line because self no longer has .owner. Thus, we need to check
+        # first here and not try to call self.owner.anything if self doesn't have
+        # .owner anymore.
+        if hasattr(self, "owner") and self.garbage_collect_data:
+            # attribute pointers are not in charge of GC
+            if self.point_to_attr is None:
+                self.owner.send_msg(ForceObjectDeleteMessage(self.id_at_location), self.location)
+
     def _create_attr_name_string(self, attr_name):
         if self.point_to_attr is not None:
-            point_to_attr = "{}.{}".format(self.point_to_attr, attr_name)
+            point_to_attr = f"{self.point_to_attr}.{attr_name}"
         else:
             point_to_attr = attr_name
         return point_to_attr
@@ -360,11 +382,15 @@ class ObjectPointer(AbstractObject):
 
     def setattr(self, name, value):
         self.owner.send_command(
-            message=("__setattr__", self, (name, value), {}), recipient=self.location
+            cmd_name="__setattr__",
+            target=self,
+            args_=(name, value),
+            kwargs_={},
+            recipient=self.location,
         )
 
     @staticmethod
-    def simplify(ptr: "ObjectPointer") -> tuple:
+    def simplify(worker: AbstractWorker, ptr: "ObjectPointer") -> tuple:
         """
         This function takes the attributes of a ObjectPointer and saves them in a dictionary
         Args:
@@ -376,10 +402,10 @@ class ObjectPointer(AbstractObject):
         """
 
         return (
-            ptr.id,
-            ptr.id_at_location,
-            ptr.location.id,
-            ptr.point_to_attr,
+            syft.serde.msgpack.serde._simplify(worker, ptr.id),
+            syft.serde.msgpack.serde._simplify(worker, ptr.id_at_location),
+            syft.serde.msgpack.serde._simplify(worker, ptr.location.id),
+            syft.serde.msgpack.serde._simplify(worker, ptr.point_to_attr),
             ptr.garbage_collect_data,
         )
 
@@ -400,8 +426,10 @@ class ObjectPointer(AbstractObject):
         # TODO: fix comment for this and simplifier
         obj_id, id_at_location, worker_id, point_to_attr, garbage_collect_data = object_tuple
 
-        if isinstance(worker_id, bytes):
-            worker_id = worker_id.decode()
+        obj_id = syft.serde.msgpack.serde._detail(worker, obj_id)
+        id_at_location = syft.serde.msgpack.serde._detail(worker, id_at_location)
+        worker_id = syft.serde.msgpack.serde._detail(worker, worker_id)
+        point_to_attr = syft.serde.msgpack.serde._detail(worker, point_to_attr)
 
         # If the pointer received is pointing at the current worker, we load the tensor instead
         if worker_id == worker.id:
@@ -409,7 +437,7 @@ class ObjectPointer(AbstractObject):
 
             if point_to_attr is not None and obj is not None:
 
-                point_to_attrs = point_to_attr.decode("utf-8").split(".")
+                point_to_attrs = point_to_attr.split(".")
                 for attr in point_to_attrs:
                     if len(attr) > 0:
                         obj = getattr(obj, attr)

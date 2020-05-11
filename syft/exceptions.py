@@ -8,6 +8,18 @@ import syft as sy
 from syft.generic.frameworks.types import FrameworkTensor
 
 
+class DependencyError(Exception):
+    def __init__(self, package, pypi_alias=None):
+        if pypi_alias is None:
+            pypi_alias = package
+        message = (
+            f"The {package} dependency is not installed. If you intend"
+            " to use it, please install it at your command line with "
+            f"`pip install {pypi_alias}`."
+        )
+        super().__init__(message)
+
+
 class PureFrameworkTensorFoundError(BaseException):
     """Exception raised for errors in the input.
     This error is used in a recursive analysis of the args provided as an
@@ -43,9 +55,7 @@ class InvalidTensorForRemoteGet(Exception):
     """Raised when a chain of pointer tensors is not provided for `remote_get`."""
 
     def __init__(self, tensor: object):
-        message = "Tensor does not have attribute child. You remote get should be called on a chain of pointer tensors, instead you called it on {}.".format(
-            tensor
-        )
+        message = f"Tensor does not have attribute child. You remote get should be called on a chain of pointer tensors, instead you called it on {tensor}."
         super().__init__(message)
 
 
@@ -136,7 +146,8 @@ class TensorsNotCollocatedException(Exception):
 
 class ResponseSignatureError(Exception):
     """Raised when the return of a hooked function is not correctly predicted
-    (when defining in advance ids for results)"""
+    (when defining in advance ids for results)
+    """
 
     def __init__(self, ids_generated=None):
         self.ids_generated = ids_generated
@@ -148,7 +159,7 @@ class ResponseSignatureError(Exception):
         return {"ids_generated": self.ids_generated}
 
     @staticmethod
-    def simplify(e):
+    def simplify(worker: "sy.workers.AbstractWorker", e):
         """
         Serialize information about an Exception which was raised to forward it
         """
@@ -162,7 +173,55 @@ class ResponseSignatureError(Exception):
             attributes = e.get_attributes()
         except AttributeError:
             attributes = {}
-        return tp.__name__, traceback_str, sy.serde._simplify(attributes)
+        return (
+            sy.serde.msgpack.serde._simplify(worker, tp.__name__),
+            sy.serde.msgpack.serde._simplify(worker, traceback_str),
+            sy.serde.msgpack.serde._simplify(worker, attributes),
+        )
+
+    @staticmethod
+    def detail(worker: "sy.workers.AbstractWorker", error_tuple: Tuple[str, str, dict]):
+        """
+        Detail and re-raise an Exception forwarded by another worker
+        """
+        error_name, traceback_str, attributes = error_tuple
+        error_name = sy.serde.msgpack.serde._detail(worker, error_name)
+        traceback_str = sy.serde.msgpack.serde._detail(worker, traceback_str)
+        attributes = sy.serde.msgpack.serde._detail(worker, attributes)
+        # De-serialize the traceback
+        tb = Traceback.from_string(traceback_str)
+        # Check that the error belongs to a valid set of Exceptions
+        if error_name in dir(sy.exceptions):
+            error_type = getattr(sy.exceptions, error_name)
+            error = error_type()
+            # Include special attributes if any
+            for attr_name, attr in attributes.items():
+                setattr(error, attr_name, attr)
+            reraise(error_type, error, tb.as_traceback())
+        else:
+            raise ValueError(f"Invalid Exception returned:\n{traceback_str}")
+
+
+class SendNotPermittedError(Exception):
+    """Raised when calling send on a tensor which does not allow
+    send to be called on it. This can happen do to sensitivity being too high"""
+
+    @staticmethod
+    def simplify(worker: "sy.workers.AbstractWorker", e):
+        """
+        Serialize information about an Exception which was raised to forward it
+        """
+        # Get information about the exception: type of error,  traceback
+        tp = type(e)
+        tb = e.__traceback__
+        # Serialize the traceback
+        traceback_str = "Traceback (most recent call last):\n" + "".join(traceback.format_tb(tb))
+        # Include special attributes if relevant
+        try:
+            attributes = e.get_attributes()
+        except AttributeError:
+            attributes = {}
+        return tp.__name__, traceback_str, sy.serde.msgpack.serde._simplify(worker, attributes)
 
     @staticmethod
     def detail(worker: "sy.workers.AbstractWorker", error_tuple: Tuple[str, str, dict]):
@@ -171,7 +230,7 @@ class ResponseSignatureError(Exception):
         """
         error_name, traceback_str, attributes = error_tuple
         error_name, traceback_str = error_name.decode("utf-8"), traceback_str.decode("utf-8")
-        attributes = sy.serde._detail(worker, attributes)
+        attributes = sy.serde.msgpack.serde._detail(worker, attributes)
         # De-serialize the traceback
         tb = Traceback.from_string(traceback_str)
         # Check that the error belongs to a valid set of Exceptions
@@ -191,7 +250,7 @@ class GetNotPermittedError(Exception):
     get to be called on it. This can happen do to sensitivity being too high"""
 
     @staticmethod
-    def simplify(e):
+    def simplify(worker: "sy.workers.AbstractWorker", e):
         """
         Serialize information about an Exception which was raised to forward it
         """
@@ -205,7 +264,11 @@ class GetNotPermittedError(Exception):
             attributes = e.get_attributes()
         except AttributeError:
             attributes = {}
-        return tp.__name__, traceback_str, sy.serde._simplify(attributes)
+        return (
+            sy.serde.msgpack.serde._simplify(worker, tp.__name__),
+            sy.serde.msgpack.serde._simplify(worker, traceback_str),
+            sy.serde.msgpack.serde._simplify(worker, attributes),
+        )
 
     @staticmethod
     def detail(worker: "sy.workers.AbstractWorker", error_tuple: Tuple[str, str, dict]):
@@ -213,8 +276,9 @@ class GetNotPermittedError(Exception):
         Detail and re-raise an Exception forwarded by another worker
         """
         error_name, traceback_str, attributes = error_tuple
-        error_name, traceback_str = error_name.decode("utf-8"), traceback_str.decode("utf-8")
-        attributes = sy.serde._detail(worker, attributes)
+        error_name = sy.serde.msgpack.serde._detail(worker, error_name)
+        traceback_str = sy.serde.msgpack.serde._detail(worker, traceback_str)
+        attributes = sy.serde.msgpack.serde._detail(worker, attributes)
         # De-serialize the traceback
         tb = Traceback.from_string(traceback_str)
         # Check that the error belongs to a valid set of Exceptions
@@ -239,7 +303,7 @@ class PlanCommandUnknownError(Exception):
     """Raised when an unknown plan command execution is requested."""
 
     def __init__(self, command_name: object):
-        message = "Command {} is not implemented.".format(command_name)
+        message = f"Command {command_name} is not implemented."
         super().__init__(message)
 
 
@@ -262,11 +326,11 @@ class ObjectNotFoundError(Exception):
             + " which does not exist!!! "
         )
         message += (
-            "Use .send() and .get() on all your tensors to make sure they're"
+            "Use .send() and .get() on all your tensors to make sure they're "
             "on the same machines. "
-            "If you think this tensor does exist, check the ._objects dictionary"
+            "If you think this tensor does exist, check the ._objects dictionary "
             "on the worker and see for yourself!!! "
-            "The most common reason this error happens is because someone calls"
+            "The most common reason this error happens is because someone calls "
             ".get() on the object's pointer without realizing it (which deletes "
             "the remote object and sends it to the pointer). Check your code to "
             "make sure you haven't already called .get() on this pointer!!!"
@@ -274,25 +338,57 @@ class ObjectNotFoundError(Exception):
         super().__init__(message)
 
 
-def route_method_exception(exception, self, args, kwargs):
+class InvalidProtocolFileError(Exception):
+    """Raised when PySyft protocol file cannot be loaded."""
+
+    pass
+
+
+class UndefinedProtocolTypeError(Exception):
+    """Raised when trying to serialize type that is not defined in protocol file."""
+
+    pass
+
+
+class UndefinedProtocolTypePropertyError(Exception):
+    """Raised when trying to get protocol type property that is not defined in protocol file."""
+
+    pass
+
+
+class EmptyCryptoPrimitiveStoreError(Exception):
+    """Raised when trying to get crypto primtives from an empty crypto store"""
+
+    def __init__(self, crypto_store, crypto_type, available_instances, n_instances):
+        message = (
+            f"You tried to run a crypto protocol on worker {crypto_store._owner.id} "
+            f"but its crypto_store doesn't have enough primitives left for the type "
+            f"'{crypto_type}' ({n_instances} were requested while only {available_instances}"
+            f" are available). Use your crypto_provider to `provide_primitives` to your "
+            f"worker."
+        )
+        super().__init__(message)
+
+
+def route_method_exception(exception, self, args_, kwargs_):
     try:
         if self.is_wrapper:
             if isinstance(self.child, sy.PointerTensor):
-                if len(args) > 0:
-                    if not args[0].is_wrapper:
-                        return TensorsNotCollocatedException(self, args[0])
-                    elif isinstance(args[0].child, sy.PointerTensor):
-                        if self.location != args[0].child.location:
-                            return TensorsNotCollocatedException(self, args[0])
+                if len(args_) > 0:
+                    if not args_[0].is_wrapper:
+                        return TensorsNotCollocatedException(self, args_[0])
+                    elif isinstance(args_[0].child, sy.PointerTensor):
+                        if self.location != args_[0].child.location:
+                            return TensorsNotCollocatedException(self, args_[0])
 
         # if self is a normal tensor
         elif isinstance(self, FrameworkTensor):
-            if len(args) > 0:
-                if args[0].is_wrapper:
-                    if isinstance(args[0].child, sy.PointerTensor):
-                        return TensorsNotCollocatedException(self, args[0])
-                elif isinstance(args[0], sy.PointerTensor):
-                    return TensorsNotCollocatedException(self, args[0])
+            if len(args_) > 0:
+                if args_[0].is_wrapper:
+                    if isinstance(args_[0].child, sy.PointerTensor):
+                        return TensorsNotCollocatedException(self, args_[0])
+                elif isinstance(args_[0], sy.PointerTensor):
+                    return TensorsNotCollocatedException(self, args_[0])
     except:
         ""
     return exception

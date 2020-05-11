@@ -1,6 +1,9 @@
 import torch
+import syft
 from .gradients_core import GradFunc
 from .gradients_core import apply_dim_transformations
+
+from syft.workers.abstract import AbstractWorker
 
 
 class AddBackward(GradFunc):
@@ -58,6 +61,16 @@ class AsinBackward(GradFunc):
         return (grad_self_,)
 
 
+class LogBackward(GradFunc):
+    def __init__(self, self_):
+        super().__init__(self, self_)
+        self.self_ = self_
+
+    def gradient(self, grad):
+        grad_self_ = grad * (1 / self.self_)
+        return (grad_self_,)
+
+
 class MulBackward(GradFunc):
     def __init__(self, self_, other):
         super().__init__(self, self_, other)
@@ -68,6 +81,16 @@ class MulBackward(GradFunc):
         grad_self_ = grad * self.other
         grad_other = grad * self.self_ if type(self.self_) == type(self.other) else None
         return (grad_self_, grad_other)
+
+
+class NegBackward(GradFunc):
+    def __init__(self, self_):
+        super().__init__(self, self_)
+        self.self_ = self_
+
+    def gradient(self, grad):
+        grad_self_ = grad * -1
+        return (grad_self_,)
 
 
 class DivBackward(GradFunc):
@@ -144,14 +167,14 @@ class SinhBackward(GradFunc):
         return (grad_self_,)
 
 
-class SqrtBackward(GradFunc):
-    def __init__(self, self_):
-        super().__init__(self, self_)
-        self.self_ = self_
-
-    def gradient(self, grad):
-        grad_self_ = grad / (2 * self.result)
-        return (grad_self_,)
+# class SqrtBackward(GradFunc):
+#     def __init__(self, self_):
+#         super().__init__(self, self_)
+#         self.self_ = self_
+#
+#     def gradient(self, grad):
+#         grad_self_ = grad / (2 * self.result) TODO: Broken as of Garbage Collection for `AutoGradTensor` (#3387)
+#         return (grad_self_,)
 
 
 class TanhBackward(GradFunc):

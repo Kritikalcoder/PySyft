@@ -104,7 +104,7 @@ def test_section_1_differential_privacy():
 
     # differencing attack using threshold
 
-    (sum(db).float() > 49) - (sum(pdb).float() > 49)
+    (sum(db).float() > 49).float() - (sum(pdb).float() > 49).float()
 
     def query(db):
 
@@ -242,7 +242,7 @@ def test_section_1_differential_privacy():
     query_result = np.argmax(counts)
     query_result
 
-    from syft.frameworks.torch.differential_privacy import pate
+    from syft.frameworks.torch.dp import pate
 
     num_teachers, num_examples, num_labels = (100, 100, 10)
     preds = (np.random.rand(num_teachers, num_examples) * num_labels).astype(int)  # fake preds
@@ -294,15 +294,15 @@ def test_section_2_federated_learning(hook):
 
     bob = sy.VirtualWorker(hook, id="bob_udacity")
 
-    bob._objects
+    bob._tensors
 
     x = th.tensor([1, 2, 3, 4, 5])
 
     x = x.send(bob)
 
-    bob._objects
+    bob._tensors
 
-    assert len(bob._objects) == 1
+    assert len(bob._tensors) == 1
 
     x.location
 
@@ -319,9 +319,9 @@ def test_section_2_federated_learning(hook):
     x = x.get()
     x
 
-    bob._objects
+    bob._tensors
 
-    assert len(bob._objects) == 0
+    assert len(bob._tensors) == 0
 
     alice = sy.VirtualWorker(hook, id="alice_udacity")
 

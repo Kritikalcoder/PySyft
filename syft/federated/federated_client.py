@@ -57,12 +57,13 @@ class FederatedClient(ObjectStorage):
 
         if optimizer_name in dir(th.optim):
             optimizer = getattr(th.optim, optimizer_name)
-            self.optimizer = optimizer(model.parameters(), **optimizer_args)
+            optimizer_args.setdefault("params", model.parameters())
+            self.optimizer = optimizer(**optimizer_args)
         else:
-            raise ValueError("Unknown optimizer: {}".format(optimizer_name))
+            raise ValueError(f"Unknown optimizer: {optimizer_name}")
         return self.optimizer
 
-    def fit(self, dataset_key: str, **kwargs):
+    def fit(self, dataset_key: str, device: str = "cpu", **kwargs):
         """Fits a model on the local dataset as specified in the local TrainConfig object.
 
         Args:
@@ -75,7 +76,7 @@ class FederatedClient(ObjectStorage):
         self._check_train_config()
 
         if dataset_key not in self.datasets:
-            raise ValueError("Dataset {} unknown.".format(dataset_key))
+            raise ValueError(f"Dataset {dataset_key} unknown.")
 
         model = self.get_obj(self.train_config._model_id).obj
         loss_fn = self.get_obj(self.train_config._loss_fn_id).obj
@@ -84,7 +85,7 @@ class FederatedClient(ObjectStorage):
             self.train_config.optimizer, model, optimizer_args=self.train_config.optimizer_args
         )
 
-        return self._fit(model=model, dataset_key=dataset_key, loss_fn=loss_fn)
+        return self._fit(model=model, dataset_key=dataset_key, loss_fn=loss_fn, device=device)
 
     def _create_data_loader(self, dataset_key: str, shuffle: bool = False):
         data_range = range(len(self.datasets[dataset_key]))
@@ -100,7 +101,7 @@ class FederatedClient(ObjectStorage):
         )
         return data_loader
 
-    def _fit(self, model, dataset_key, loss_fn):
+    def _fit(self, model, dataset_key, loss_fn, device="cpu"):
         model.train()
         data_loader = self._create_data_loader(
             dataset_key=dataset_key, shuffle=self.train_config.shuffle
@@ -115,8 +116,8 @@ class FederatedClient(ObjectStorage):
                 self.optimizer.zero_grad()
 
                 # Update model
-                output = model(data)
-                loss = loss_fn(target=target, pred=output)
+                output = model(data.to(device))
+                loss = loss_fn(target=target.to(device), pred=output)
                 loss.backward()
                 self.optimizer.step()
 
@@ -134,6 +135,7 @@ class FederatedClient(ObjectStorage):
         nr_bins: int = -1,
         return_loss: bool = True,
         return_raw_accuracy: bool = True,
+        device: str = "cpu",
     ):
         """Evaluates a model on the local dataset as specified in the local TrainConfig object.
 
@@ -143,6 +145,7 @@ class FederatedClient(ObjectStorage):
             nr_bins: Used together with calculate_histograms. Provide the number of classes/bins.
             return_loss: If True, loss is calculated additionally.
             return_raw_accuracy: If True, return nr_correct_predictions and nr_predictions
+            device: "cuda" or "cpu"
 
         Returns:
             Dictionary containing depending on the provided flags:
@@ -155,13 +158,13 @@ class FederatedClient(ObjectStorage):
         self._check_train_config()
 
         if dataset_key not in self.datasets:
-            raise ValueError("Dataset {} unknown.".format(dataset_key))
+            raise ValueError(f"Dataset {dataset_key} unknown.")
 
         eval_result = dict()
         model = self.get_obj(self.train_config._model_id).obj
         loss_fn = self.get_obj(self.train_config._loss_fn_id).obj
         model.eval()
-        device = "cpu"
+        device = "cuda" if device == "cuda" else "cpu"
         data_loader = self._create_data_loader(dataset_key=dataset_key, shuffle=False)
         test_loss = 0.0
         correct = 0
@@ -197,3 +200,6 @@ class FederatedClient(ObjectStorage):
             eval_result["histogram_target"] = hist_target
 
         return eval_result
+
+    def _log_msgs(self, value):
+        self.log_msgs = value

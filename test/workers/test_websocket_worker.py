@@ -7,7 +7,7 @@ import pytest
 import torch
 import syft as sy
 from syft.generic.frameworks.hook import hook_args
-from syft.frameworks.torch.federated import utils
+from syft.frameworks.torch.fl import utils
 
 from syft.workers.websocket_client import WebsocketClientWorker
 from syft.workers.websocket_server import WebsocketServerWorker
@@ -117,16 +117,13 @@ def test_list_objects_remote(hook, start_remote_worker):
 
     x = torch.tensor([1, 2, 3]).send(remote_proxy)
 
-    res = remote_proxy.list_objects_remote()
+    res = remote_proxy.list_tensors_remote()
 
-    x = torch.tensor([1, 2, 3]).send(remote_proxy)
-
-    res = remote_proxy.list_objects_remote()
     res_dict = eval(res.replace("tensor", "torch.tensor"))
     assert len(res_dict) == 1
 
     y = torch.tensor([4, 5, 6]).send(remote_proxy)
-    res = remote_proxy.list_objects_remote()
+    res = remote_proxy.list_tensors_remote()
     res_dict = eval(res.replace("tensor", "torch.tensor"))
     assert len(res_dict) == 2
 
@@ -146,15 +143,15 @@ def test_objects_count_remote(hook, start_remote_worker):
 
     x = torch.tensor([1, 2, 3]).send(remote_proxy)
 
-    nr_objects = remote_proxy.objects_count_remote()
+    nr_objects = remote_proxy.tensors_count_remote()
     assert nr_objects == 1
 
     y = torch.tensor([4, 5, 6]).send(remote_proxy)
-    nr_objects = remote_proxy.objects_count_remote()
+    nr_objects = remote_proxy.tensors_count_remote()
     assert nr_objects == 2
 
     x.get()
-    nr_objects = remote_proxy.objects_count_remote()
+    nr_objects = remote_proxy.tensors_count_remote()
     assert nr_objects == 1
 
     # delete remote object before terminating the websocket connection
@@ -172,7 +169,7 @@ def test_clear_objects_remote(hook, start_remote_worker):
     x = torch.tensor([1, 2, 3]).send(remote_proxy, garbage_collect_data=False)
     y = torch.tensor(4).send(remote_proxy, garbage_collect_data=False)
 
-    nr_objects = remote_proxy.objects_count_remote()
+    nr_objects = remote_proxy.tensors_count_remote()
     assert nr_objects == 2
 
     remote_proxy.clear_objects_remote()
@@ -185,12 +182,12 @@ def test_clear_objects_remote(hook, start_remote_worker):
 
 
 def test_connect_close(hook, start_remote_worker):
-    server, remote_proxy = start_remote_worker(id="fed-connect-close", hook=hook, port=8771)
+    server, remote_proxy = start_remote_worker(id="fed-connect-close", hook=hook, port=8770)
 
     x = torch.tensor([1, 2, 3])
     x_ptr = x.send(remote_proxy)
 
-    assert remote_proxy.objects_count_remote() == 1
+    assert remote_proxy.tensors_count_remote() == 1
 
     remote_proxy.close()
 
@@ -198,7 +195,7 @@ def test_connect_close(hook, start_remote_worker):
 
     remote_proxy.connect()
 
-    assert remote_proxy.objects_count_remote() == 1
+    assert remote_proxy.tensors_count_remote() == 1
 
     x_val = x_ptr.get()
     assert (x_val == x).all()
@@ -214,7 +211,7 @@ def test_connect_close(hook, start_remote_worker):
 def test_websocket_worker_multiple_output_response(hook, start_remote_worker):
     """Evaluates that you can do basic tensor operations using
     WebsocketServerWorker."""
-    server, remote_proxy = start_remote_worker(id="socket_multiple_output", hook=hook, port=8768)
+    server, remote_proxy = start_remote_worker(id="socket_multiple_output", hook=hook, port=8771)
 
     x = torch.tensor([1.0, 3, 2])
     x = x.send(remote_proxy)
@@ -231,10 +228,45 @@ def test_websocket_worker_multiple_output_response(hook, start_remote_worker):
     server.terminate()
 
 
-@pytest.mark.skipif(
-    torch.__version__ >= "1.1",
-    reason="bug in pytorch version 1.1.0, jit.trace returns raw C function",
-)
+def test_send_command_whitelist(hook, start_remote_worker):
+    server, remote_proxy = start_remote_worker(
+        id="worker_call_api_good_methods", hook=hook, port=8772
+    )
+    whitelisted_methods = {
+        "torch": {"tensor": [1, 2, 3], "rand": (2, 3), "randn": (2, 3), "zeros": (2, 3)}
+    }
+
+    for framework, methods in whitelisted_methods.items():
+        attr = getattr(remote_proxy.remote, framework)
+
+        for method, inp in methods.items():
+            x = getattr(attr, method)(inp)
+
+            if "rand" not in method:
+                assert (x.get() == getattr(torch, method)(inp)).all()
+
+    remote_proxy.close()
+    server.terminate()
+
+
+def test_send_command_not_whitelisted(hook, start_remote_worker):
+    server, remote_proxy = start_remote_worker(
+        id="worker_call_api_bad_method", hook=hook, port=8773
+    )
+
+    method_not_exist = "openmind"
+
+    for framework in remote_proxy.remote.frameworks:
+        if framework in dir(remote_proxy.remote):
+            attr = getattr(remote_proxy.remote, framework)
+            with pytest.raises(AttributeError):
+                getattr(attr, method_not_exist)
+
+    remote_proxy.close()
+    server.terminate()
+
+
+@pytest.mark.skip
 def test_evaluate(hook, start_proc):  # pragma: no cover
 
     sy.local_worker.clear_objects()
@@ -275,7 +307,7 @@ def test_evaluate(hook, start_proc):  # pragma: no cover
     pred = model(data)
     loss_before = loss_fn(target=target, pred=pred)
     if PRINT_IN_UNITTESTS:  # pragma: no cover
-        print("Loss: {}".format(loss_before))
+        print(f"Loss: {loss_before}")
 
     # Create and send train config
     train_config = sy.TrainConfig(
@@ -297,7 +329,7 @@ def test_evaluate(hook, start_proc):  # pragma: no cover
     hist_target = result["histogram_target"]
 
     if PRINT_IN_UNITTESTS:  # pragma: no cover
-        print("Evaluation result before training: {}".format(result))
+        print(f"Evaluation result before training: {result}")
 
     assert len_dataset == 30
     assert (hist_target == [10, 10, 10]).all()

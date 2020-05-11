@@ -1,5 +1,4 @@
-from typing import List
-from typing import Union
+from typing import List, Union
 
 import syft
 from syft.generic.frameworks.hook.hook_args import one
@@ -10,7 +9,10 @@ from syft.generic.frameworks.types import FrameworkShapeType
 from syft.generic.frameworks.types import FrameworkTensor
 from syft.generic.tensor import AbstractTensor
 from syft.generic.pointers.object_pointer import ObjectPointer
+from syft.messaging.message import TensorCommandMessage
 from syft.workers.abstract import AbstractWorker
+
+from syft_proto.generic.pointers.v1.pointer_tensor_pb2 import PointerTensor as PointerTensorPB
 
 from syft.exceptions import RemoteObjectFoundError
 
@@ -18,11 +20,11 @@ from syft.exceptions import RemoteObjectFoundError
 class PointerTensor(ObjectPointer, AbstractTensor):
     """A pointer to another tensor.
 
-    A PointerTensor forwards all API calls to the remote.PointerTensor objects
-    point to tensors (as their name implies). They exist to mimic the entire
-    API of a normal tensor, but instead of computing a tensor function locally
-    (such as addition, subtraction, etc.) they forward the computation to a
-    remote machine as specified by self.location. Specifically, every
+    A PointerTensor forwards all API calls to the remote tensor. PointerTensor
+    objects point to tensors (as their name implies). They exist to mimic the
+    entire API of a normal tensor, but instead of computing a tensor function
+    locally (such as addition, subtraction, etc.) they forward the computation
+    to a remote machine as specified by self.location. Specifically, every
     PointerTensor has a tensor located somewhere that it points to (they should
     never exist by themselves). Note that PointerTensor objects can point to
     both FrameworkTensor objects AND to other PointerTensor objects. Furthermore,
@@ -152,7 +154,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
     def clone(self):
         """
         Clone should keep ids unchanged, contrary to copy.
-        We make the choice that a clone operation is local, and can't affect
+        We make the choice that a clone action is local, and can't affect
         the remote tensors, so garbage_collect_data is always False, both
         for the tensor cloned and the clone.
         """
@@ -176,10 +178,10 @@ class PointerTensor(ObjectPointer, AbstractTensor):
     @staticmethod
     def create_pointer(
         tensor,
-        location: AbstractWorker = None,
+        location: Union[AbstractWorker, str] = None,
         id_at_location: (str or int) = None,
         register: bool = False,
-        owner: AbstractWorker = None,
+        owner: Union[AbstractWorker, str] = None,
         ptr_id: (str or int) = None,
         garbage_collect_data=None,
         shape=None,
@@ -257,19 +259,52 @@ class PointerTensor(ObjectPointer, AbstractTensor):
 
         return ptr
 
-    def move(self, location):
-        ptr = self.owner.send(self, location)
-        ptr.remote_get()
-        # don't want it to accidentally delete the remote object
-        # when this pointer is deleted
-        ptr.garbage_collect_data = False
+    def move(self, destination: AbstractWorker, requires_grad: bool = False):
+        """
+        Will move the remove value from self.location A to destination B
+        Note a A will keep a copy of his value that he sent to B. This follows the
+        .send() paradigm where the local worker keeps a copy of the value he sends.
+        Args:
+            destination: the new location of the remote data
+            requires_grad: see send() for details
+        Returns:
+            A pointer to location
+        """
+        # move to local target is equivalent to doing .get()
+        if self.owner.id == destination.id:
+            return self.get()
+
+        ptr = self.remote_send(destination, requires_grad=requires_grad)
+
+        # We make the pointer point at the remote value. As the id doesn't change,
+        # we don't update ptr.id_at_location. See issue #3217 about this.
+        # Note that you have now 2 pointers on different locations pointing to the
+        # same tensor.
+        ptr.location = destination
+
         return ptr
 
-    def remote_get(self):
-        self.owner.send_command(message=("mid_get", self, (), {}), recipient=self.location)
+    def remote_send(self, destination: AbstractWorker, requires_grad: bool = False):
+        """ Request the worker where the tensor being pointed to belongs to send it to destination.
+        For instance, if C holds a pointer, ptr, to a tensor on A and calls ptr.remote_send(B),
+        C will hold a pointer to a pointer on A which points to the tensor on B.
+        Args:
+            destination: where the remote value should be sent
+            requires_grad: if true updating the grad of the remote tensor on destination B will trigger
+                a message to update the gradient of the value on A.
+        """
+        kwargs_ = {"inplace": False, "requires_grad": requires_grad}
+        message = TensorCommandMessage.communication(
+            "remote_send", self, (destination.id,), kwargs_, (self.id,)
+        )
+        self.owner.send_msg(message=message, location=self.location)
         return self
 
-    def get(self, deregister_ptr: bool = True):
+    def remote_get(self):
+        self.owner.send_command(cmd_name="mid_get", target=self, recipient=self.location)
+        return self
+
+    def get(self, user=None, reason: str = "", deregister_ptr: bool = True):
         """Requests the tensor/chain being pointed to, be serialized and return
 
         Since PointerTensor objects always point to a remote tensor (or chain
@@ -284,7 +319,8 @@ class PointerTensor(ObjectPointer, AbstractTensor):
 
 
         Args:
-
+            user (obj, optional): user credentials to perform authentication process.
+            reason (str, optional): a description of why the data scientist wants to see it.
             deregister_ptr (bool, optional): this determines whether to
                 deregister this pointer from the pointer's owner during this
                 method. This defaults to True because the main reason people use
@@ -295,7 +331,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
             An AbstractTensor object which is the tensor (or chain) that this
             object used to point to #on a remote machine.
         """
-        tensor = ObjectPointer.get(self, deregister_ptr=deregister_ptr)
+        tensor = ObjectPointer.get(self, user=user, reason=reason, deregister_ptr=deregister_ptr)
 
         # TODO: remove these 3 lines
         # The fact we have to check this means
@@ -303,7 +339,6 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         if tensor.is_wrapper:
             if isinstance(tensor.child, FrameworkTensor):
                 return tensor.child
-
         return tensor
 
     def attr(self, attr_name):
@@ -327,12 +362,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         Returns:
             A pointer to an FixPrecisionTensor
         """
-
-        # Send the command
-        command = ("fix_prec", self, args, kwargs)
-
-        response = self.owner.send_command(self.location, command)
-
+        response = self.owner.send_command(self.location, "fix_prec", self, args, kwargs)
         return response
 
     fix_precision = fix_prec
@@ -344,12 +374,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         Returns:
             A pointer to a Tensor
         """
-
-        # Send the command
-        command = ("float_prec", self, args, kwargs)
-
-        response = self.owner.send_command(self.location, command)
-
+        response = self.owner.send_command(self.location, "float_prec", self, args, kwargs)
         return response
 
     float_precision = float_prec
@@ -361,12 +386,10 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         Returns:
             A pointer to an AdditiveSharingTensor
         """
+        if len(args) < 2:
+            raise RuntimeError("Error, share must have > 1 arguments all of type syft.workers")
 
-        # Send the command
-        command = ("share", self, args, kwargs)
-
-        response = self.owner.send_command(self.location, command)
-
+        response = self.owner.send_command(self.location, "share", self, args, kwargs)
         return response
 
     def share_(self, *args, **kwargs):
@@ -376,12 +399,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         Returns:
             A pointer to an AdditiveSharingTensor
         """
-
-        # Send the command
-        command = ("share_", self, args, kwargs)
-
-        response = self.owner.send_command(self.location, command)
-
+        response = self.owner.send_command(self.location, "share_", self, args, kwargs)
         return self
 
     def set_garbage_collect_data(self, value):
@@ -400,10 +418,11 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         return self.eq(other)
 
     @staticmethod
-    def simplify(ptr: "PointerTensor") -> tuple:
+    def simplify(worker: AbstractWorker, ptr: "PointerTensor") -> tuple:
         """
         This function takes the attributes of a PointerTensor and saves them in a dictionary
         Args:
+            worker (AbstractWorker): the worker doing the serialization
             ptr (PointerTensor): a PointerTensor
         Returns:
             tuple: a tuple holding the unique attributes of the pointer
@@ -411,13 +430,21 @@ class PointerTensor(ObjectPointer, AbstractTensor):
             data = simplify(ptr)
         """
 
+        if ptr.tags:
+            tags = tuple(ptr.tags)  # Need to be converted (set data structure isn't serializable)
+        else:
+            tags = None
+
         return (
-            ptr.id,
-            ptr.id_at_location,
-            ptr.location.id,
-            ptr.point_to_attr,
-            syft.serde._simplify(ptr._shape),
+            # ptr.id,
+            syft.serde.msgpack.serde._simplify(worker, ptr.id),
+            syft.serde.msgpack.serde._simplify(worker, ptr.id_at_location),
+            syft.serde.msgpack.serde._simplify(worker, ptr.location.id),
+            syft.serde.msgpack.serde._simplify(worker, ptr.point_to_attr),
+            syft.serde.msgpack.serde._simplify(worker, ptr._shape),
             ptr.garbage_collect_data,
+            tags,
+            ptr.description,
         )
 
         # a more general but slower/more verbose option
@@ -443,13 +470,24 @@ class PointerTensor(ObjectPointer, AbstractTensor):
             ptr = detail(data)
         """
         # TODO: fix comment for this and simplifier
-        obj_id, id_at_location, worker_id, point_to_attr, shape, garbage_collect_data = tensor_tuple
+        (
+            obj_id,
+            id_at_location,
+            worker_id,
+            point_to_attr,
+            shape,
+            garbage_collect_data,
+            tags,
+            description,
+        ) = tensor_tuple
 
-        if isinstance(worker_id, bytes):
-            worker_id = worker_id.decode()
+        obj_id = syft.serde.msgpack.serde._detail(worker, obj_id)
+        id_at_location = syft.serde.msgpack.serde._detail(worker, id_at_location)
+        worker_id = syft.serde.msgpack.serde._detail(worker, worker_id)
+        point_to_attr = syft.serde.msgpack.serde._detail(worker, point_to_attr)
 
         if shape is not None:
-            shape = syft.hook.create_shape(syft.serde._detail(worker, shape))
+            shape = syft.hook.create_shape(syft.serde.msgpack.serde._detail(worker, shape))
 
         # If the pointer received is pointing at the current worker, we load the tensor instead
         if worker_id == worker.id:
@@ -457,7 +495,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
 
             if point_to_attr is not None and tensor is not None:
 
-                point_to_attrs = point_to_attr.decode("utf-8").split(".")
+                point_to_attrs = point_to_attr.split(".")
                 for attr in point_to_attrs:
                     if len(attr) > 0:
                         tensor = getattr(tensor, attr)
@@ -466,7 +504,7 @@ class PointerTensor(ObjectPointer, AbstractTensor):
 
                     if not tensor.is_wrapper and not isinstance(tensor, FrameworkTensor):
                         # if the tensor is a wrapper then it doesn't need to be wrapped
-                        # i the tensor isn't a wrapper, BUT it's just a plain torch tensor,
+                        # if the tensor isn't a wrapper, BUT it's just a plain torch tensor,
                         # then it doesn't need to be wrapped.
                         # if the tensor is not a wrapper BUT it's also not a torch tensor,
                         # then it needs to be wrapped or else it won't be able to be used
@@ -486,6 +524,8 @@ class PointerTensor(ObjectPointer, AbstractTensor):
                 id=obj_id,
                 shape=shape,
                 garbage_collect_data=garbage_collect_data,
+                tags=tags,
+                description=description,
             )
 
             return ptr
@@ -502,6 +542,72 @@ class PointerTensor(ObjectPointer, AbstractTensor):
         #         val = v
         #     new_data[key] = val
         # return PointerTensor(**new_data)
+
+    @staticmethod
+    def bufferize(worker: AbstractWorker, ptr: "PointerTensor") -> PointerTensorPB:
+        protobuf_pointer = PointerTensorPB()
+
+        syft.serde.protobuf.proto.set_protobuf_id(protobuf_pointer.object_id, ptr.id)
+        syft.serde.protobuf.proto.set_protobuf_id(protobuf_pointer.location_id, ptr.location.id)
+        syft.serde.protobuf.proto.set_protobuf_id(
+            protobuf_pointer.object_id_at_location, ptr.id_at_location
+        )
+
+        if ptr.point_to_attr:
+            protobuf_pointer.point_to_attr = ptr.point_to_attr
+        protobuf_pointer.garbage_collect_data = ptr.garbage_collect_data
+        return protobuf_pointer
+
+    @staticmethod
+    def unbufferize(worker: AbstractWorker, protobuf_tensor: PointerTensorPB) -> "PointerTensor":
+        # Extract the field values
+
+        obj_id = syft.serde.protobuf.proto.get_protobuf_id(protobuf_tensor.object_id)
+        obj_id_at_location = syft.serde.protobuf.proto.get_protobuf_id(
+            protobuf_tensor.object_id_at_location
+        )
+        worker_id = syft.serde.protobuf.proto.get_protobuf_id(protobuf_tensor.location_id)
+        point_to_attr = protobuf_tensor.point_to_attr
+        shape = syft.hook.create_shape(protobuf_tensor.shape.dims)
+        garbage_collect_data = protobuf_tensor.garbage_collect_data
+
+        # If the pointer received is pointing at the current worker, we load the tensor instead
+        if worker_id == worker.id:
+            tensor = worker.get_obj(obj_id_at_location)
+
+            if point_to_attr is not None and tensor is not None:
+
+                point_to_attrs = point_to_attr.split(".")
+                for attr in point_to_attrs:
+                    if len(attr) > 0:
+                        tensor = getattr(tensor, attr)
+
+                if tensor is not None:
+
+                    if not tensor.is_wrapper and not isinstance(tensor, FrameworkTensor):
+                        # if the tensor is a wrapper then it doesn't need to be wrapped
+                        # if the tensor isn't a wrapper, BUT it's just a plain torch tensor,
+                        # then it doesn't need to be wrapped.
+                        # if the tensor is not a wrapper BUT it's also not a torch tensor,
+                        # then it needs to be wrapped or else it won't be able to be used
+                        # by other interfaces
+                        tensor = tensor.wrap()
+
+            return tensor
+        # Else we keep the same Pointer
+        else:
+            location = syft.hook.local_worker.get_worker(worker_id)
+
+            ptr = PointerTensor(
+                location=location,
+                id_at_location=obj_id_at_location,
+                owner=worker,
+                id=obj_id,
+                shape=shape,
+                garbage_collect_data=garbage_collect_data,
+            )
+
+            return ptr
 
 
 ### Register the tensor with hook_args.py ###

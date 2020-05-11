@@ -1,8 +1,12 @@
+import importlib
+
 import torch
 
 from syft.frameworks.torch.hook.hook import TorchHook
 from syft.workers.virtual import VirtualWorker
-from syft.grid import VirtualGrid
+from syft.grid.private_grid import PrivateGridNetwork
+
+from syft.exceptions import DependencyError
 
 def hook(gbs):
     return create_sandbox(gbs, verbose=False, download_data=False)
@@ -24,6 +28,9 @@ def create_sandbox(gbs, verbose=True, download_data=True):
     global andy
     global jason
     global jon
+
+    if download_data and importlib.util.find_spec("sklearn") is None:
+        raise DependencyError("sklearn", "scikit-learn")
 
     if download_data:  # pragma: no cover
         from sklearn.datasets import load_boston
@@ -153,7 +160,11 @@ def create_sandbox(gbs, verbose=True, download_data=True):
 
     if verbose:
         print("\tCollecting workers into a VirtualGrid...")
-    _grid = VirtualGrid(*gbs["workers"])
+    _grid = PrivateGridNetwork(*gbs["workers"])
     gbs["grid"] = _grid
 
     print("Done!")
+
+
+def make_hook(gbs):
+    return create_sandbox(gbs, False, False)

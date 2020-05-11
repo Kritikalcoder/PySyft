@@ -83,6 +83,17 @@ class PointerPlan(ObjectPointer):
         Transform the call on the pointer in a request to evaluate the
         remote plan
         """
+        if len(self._locations) > 1 and isinstance(args[0], sy.MultiPointerTensor):
+            responses = {}
+            for location in self._locations:
+                child_args = [
+                    x.child[location.id] if isinstance(x, sy.MultiPointerTensor) else x
+                    for x in args
+                ]
+                responses[location.id] = self.__call__(*child_args, **kwargs)
+
+            return responses
+
         if len(self._locations) == 1:
             location = self.location
         else:
@@ -92,6 +103,26 @@ class PointerPlan(ObjectPointer):
         response = self.request_run_plan(location, result_ids, *args)
 
         return response
+
+    def parameters(self) -> List:
+        """Return a list of pointers to the plan parameters"""
+
+        assert (
+            len(self._locations) == 1
+        ), ".parameters() for PointerPlan with > 1 locations is currently not implemented."
+        # TODO implement this feature using MultiPointerTensor
+
+        location = self._locations[0]
+        id_at_location = self._ids_at_location[0]
+
+        pointers = self.owner.send_command(
+            cmd_name="parameters", target=id_at_location, recipient=location
+        )
+
+        for pointer in pointers:
+            pointer.garbage_collect_data = False
+
+        return [pointer.wrap() for pointer in pointers]
 
     def request_run_plan(
         self,
@@ -130,13 +161,19 @@ class PointerPlan(ObjectPointer):
                 id_at_location = id_at_loc
                 break
 
-        command = ("run", id_at_location, args, kwargs)
-
         response = self.owner.send_command(
-            message=command, recipient=location, return_ids=response_ids
+            cmd_name="run",
+            target=id_at_location,
+            args_=tuple(args),
+            recipient=location,
+            return_ids=tuple(response_ids),
         )
         response = hook_args.hook_response(plan_name, response, wrap_type=FrameworkTensor[0])
-        response.garbage_collect_data = False
+        if isinstance(response, (list, tuple)):
+            for r in response:
+                r.garbage_collect_data = False
+        else:
+            response.garbage_collect_data = False
         return response
 
     def get(self, deregister_ptr: bool = True):
@@ -148,17 +185,25 @@ class PointerPlan(ObjectPointer):
         return plan
 
     @staticmethod
-    def simplify(ptr: "PointerPlan") -> tuple:
+    def simplify(worker: AbstractWorker, ptr: "PointerPlan") -> tuple:
 
-        return (ptr.id, ptr.id_at_location, ptr.location.id, ptr.garbage_collect_data)
+        return (
+            sy.serde.msgpack.serde._simplify(worker, ptr.id),
+            sy.serde.msgpack.serde._simplify(worker, ptr.id_at_location),
+            sy.serde.msgpack.serde._simplify(worker, ptr.location.id),
+            sy.serde.msgpack.serde._simplify(worker, ptr.tags),
+            ptr.garbage_collect_data,
+        )
 
     @staticmethod
     def detail(worker: AbstractWorker, tensor_tuple: tuple) -> "PointerPlan":
         # TODO: fix comment for this and simplifier
-        obj_id, id_at_location, worker_id, garbage_collect_data = tensor_tuple
+        obj_id, id_at_location, worker_id, tags, garbage_collect_data = tensor_tuple
 
-        if isinstance(worker_id, bytes):
-            worker_id = worker_id.decode()
+        obj_id = sy.serde.msgpack.serde._detail(worker, obj_id)
+        id_at_location = sy.serde.msgpack.serde._detail(worker, id_at_location)
+        worker_id = sy.serde.msgpack.serde._detail(worker, worker_id)
+        tags = sy.serde.msgpack.serde._detail(worker, tags)
 
         # If the pointer received is pointing at the current worker, we load the tensor instead
         if worker_id == worker.id:
@@ -173,6 +218,7 @@ class PointerPlan(ObjectPointer):
                 location=location,
                 id_at_location=id_at_location,
                 owner=worker,
+                tags=tags,
                 garbage_collect_data=garbage_collect_data,
                 id=obj_id,
             )

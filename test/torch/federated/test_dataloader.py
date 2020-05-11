@@ -1,14 +1,14 @@
 import torch as th
 import syft as sy
-from syft.frameworks.torch import federated
+from syft.frameworks.torch import fl
 
 
 def test_federated_dataloader(workers):
     bob = workers["bob"]
     alice = workers["alice"]
     datasets = [
-        federated.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
-        federated.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
+        fl.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
+        fl.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
     ]
     fed_dataset = sy.FederatedDataset(datasets)
 
@@ -31,8 +31,8 @@ def test_federated_dataloader_shuffle(workers):
     bob = workers["bob"]
     alice = workers["alice"]
     datasets = [
-        federated.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
-        federated.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
+        fl.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
+        fl.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
     ]
     fed_dataset = sy.FederatedDataset(datasets)
 
@@ -43,11 +43,11 @@ def test_federated_dataloader_shuffle(workers):
             if counter < 1:  # one batch for bob, two batches for alice (batch_size == 2)
                 assert (
                     data.location.id == "bob"
-                ), "id should be bob, counter = {0}, epoch = {1}".format(counter, epoch)
+                ), f"id should be bob, counter = {counter}, epoch = {epoch}"
             else:
                 assert (
                     data.location.id == "alice"
-                ), "id should be alice, counter = {0}, epoch = {1}".format(counter, epoch)
+                ), f"id should be alice, counter = {counter}, epoch = {epoch}"
             counter += 1
         assert counter == len(fdataloader), f"{counter} == {len(fdataloader)}"
 
@@ -65,9 +65,9 @@ def test_federated_dataloader_num_iterators(workers):
     alice = workers["alice"]
     james = workers["james"]
     datasets = [
-        federated.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
-        federated.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
-        federated.BaseDataset(th.tensor([7, 8, 9, 10]), th.tensor([7, 8, 9, 10])).send(james),
+        fl.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
+        fl.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
+        fl.BaseDataset(th.tensor([7, 8, 9, 10]), th.tensor([7, 8, 9, 10])).send(james),
     ]
 
     fed_dataset = sy.FederatedDataset(datasets)
@@ -110,9 +110,9 @@ def test_federated_dataloader_iter_per_worker(workers):
     alice = workers["alice"]
     james = workers["james"]
     datasets = [
-        federated.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
-        federated.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
-        federated.BaseDataset(th.tensor([7, 8, 9, 10]), th.tensor([7, 8, 9, 10])).send(james),
+        fl.BaseDataset(th.tensor([1, 2]), th.tensor([1, 2])).send(bob),
+        fl.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(alice),
+        fl.BaseDataset(th.tensor([7, 8, 9, 10]), th.tensor([7, 8, 9, 10])).send(james),
     ]
 
     fed_dataset = sy.FederatedDataset(datasets)
@@ -130,7 +130,7 @@ def test_federated_dataloader_iter_per_worker(workers):
 def test_federated_dataloader_one_worker(workers):
     bob = workers["bob"]
 
-    datasets = [federated.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(bob)]
+    datasets = [fl.BaseDataset(th.tensor([3, 4, 5, 6]), th.tensor([3, 4, 5, 6])).send(bob)]
 
     fed_dataset = sy.FederatedDataset(datasets)
     num_iterators = len(datasets)

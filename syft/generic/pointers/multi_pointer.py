@@ -75,6 +75,9 @@ class MultiPointerTensor(AbstractTensor):
 
             if pointer_grad is None:
                 results[worker] = None
+            elif pointer_grad.is_wrapper:
+                results[worker] = pointer_grad.child
+                all_none = False
             else:
                 results[worker] = pointer_grad
                 all_none = False
@@ -146,21 +149,21 @@ class MultiPointerTensor(AbstractTensor):
         return results
 
     @staticmethod
-    def dispatch(args, worker):
+    def dispatch(args_, worker):
         """
         utility function for handle_func_command which help to select
         shares (seen as elements of dict) in an argument set. It could
         perhaps be put elsewhere
 
         Args:
-            args: arguments to give to a functions
+            args_: arguments to give to a functions
             worker: owner of the shares to select
 
         Return:
-            args where the MultiPointerTensor are replaced by
+            args_ where the MultiPointerTensor are replaced by
             the appropriate share
         """
-        return map(lambda x: x[worker] if isinstance(x, dict) else x, args)
+        return map(lambda x: x[worker] if isinstance(x, dict) else x, args_)
 
     @classmethod
     def handle_func_command(cls, command):
@@ -174,26 +177,26 @@ class MultiPointerTensor(AbstractTensor):
 
         Args:
             command: instruction of a function command: (command name,
-            <no self>, arguments[, kwargs])
+            <no self>, arguments[, kwargs_])
 
         Returns:
             the response of the function command
         """
 
-        cmd, _, args, kwargs = command
+        cmd, _, args_, kwargs_ = command
 
-        tensor = args[0]
+        tensor = args_[0]
 
         # Check that the function has not been overwritten
         try:
             # Try to get recursively the attributes in cmd = "<attr1>.<attr2>.<attr3>..."
             cmd = cls.rgetattr(cls, cmd)
-            return cmd(*args, **kwargs)
+            return cmd(*args_, **kwargs_)
         except AttributeError:
             pass
 
         # Replace all LoggingTensor with their child attribute
-        new_args, new_kwargs, new_type = hook_args.unwrap_args_from_function(cmd, args, kwargs)
+        new_args, new_kwargs, new_type = hook_args.unwrap_args_from_function(cmd, args_, kwargs_)
 
         results = {}
         for worker, share in new_args[0].items():
@@ -219,7 +222,7 @@ class MultiPointerTensor(AbstractTensor):
             share.child.garbage_collect_data = value
 
     @staticmethod
-    def simplify(tensor: "MultiPointerTensor") -> tuple:
+    def simplify(worker: AbstractWorker, tensor: "MultiPointerTensor") -> tuple:
         """
         This function takes the attributes of a MultiPointerTensor and saves them in a tuple
         Args:
@@ -232,8 +235,9 @@ class MultiPointerTensor(AbstractTensor):
 
         chain = None
         if hasattr(tensor, "child"):
-            chain = sy.serde._simplify(tensor.child)
-        return (tensor.id, chain)
+            chain = sy.serde.msgpack.serde._simplify(worker, tensor.child)
+
+        return (sy.serde.msgpack.serde._simplify(worker, tensor.id), chain)
 
     @staticmethod
     def detail(worker: AbstractWorker, tensor_tuple: tuple) -> "MultiPointerTensor":
@@ -250,10 +254,12 @@ class MultiPointerTensor(AbstractTensor):
 
         tensor_id, chain = tensor_tuple
 
-        tensor = sy.MultiPointerTensor(owner=worker, id=tensor_id)
+        tensor = sy.MultiPointerTensor(
+            owner=worker, id=sy.serde.msgpack.serde._detail(worker, tensor_id)
+        )
 
         if chain is not None:
-            chain = sy.serde._detail(worker, chain)
+            chain = sy.serde.msgpack.serde._detail(worker, chain)
             tensor.child = chain
 
         return tensor

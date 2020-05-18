@@ -3,7 +3,8 @@ import functools
 from typing import Set
 
 import syft as sy
-from syft.generic.frameworks.hook import hook_args
+
+# from syft.generic.frameworks.hook import hook_args
 
 
 class AbstractObject(ABC):
@@ -149,6 +150,8 @@ class AbstractObject(ABC):
             the response of the function command
         """
         cmd, _, args_, kwargs_ = command
+
+        from syft.generic.frameworks.hook import hook_args
 
         # Check that the function has not been overwritten
         try:

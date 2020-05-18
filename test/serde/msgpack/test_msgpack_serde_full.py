@@ -59,7 +59,7 @@ samples[syft.execution.state.State] = make_state
 samples[syft.federated.train_config.TrainConfig] = make_trainconfig
 
 samples[syft.frameworks.torch.fl.dataset.BaseDataset] = make_basedataset
-samples[syft.frameworks.torch.tensors.decorators.logging.LoggingTensor] = make_loggingtensor
+samples[syft.frameworks.torch.tensors.decorators.loggingTensor.LoggingTensor] = make_loggingtensor
 samples[
     syft.frameworks.torch.tensors.interpreters.additive_shared.AdditiveSharingTensor
 ] = make_additivesharingtensor

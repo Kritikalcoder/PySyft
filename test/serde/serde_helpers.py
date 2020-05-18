@@ -603,10 +603,12 @@ def make_fixedprecisiontensor(**kwargs):
 # LoggingTensor
 def make_loggingtensor(**kwargs):
     t = torch.randn(3, 3)
-    lt = syft.frameworks.torch.tensors.decorators.logging.LoggingTensor().on(t).child
+    lt = syft.frameworks.torch.tensors.decorators.loggingTensor.LoggingTensor().on(t).child
 
     def compare(detailed, original):
-        assert type(detailed) == syft.frameworks.torch.tensors.decorators.logging.LoggingTensor
+        assert (
+            type(detailed) == syft.frameworks.torch.tensors.decorators.loggingTensor.LoggingTensor
+        )
         assert detailed.id == original.id
         assert detailed.child.equal(original.child)
         return True
@@ -615,7 +617,7 @@ def make_loggingtensor(**kwargs):
         {
             "value": lt,
             "simplified": (
-                CODE[syft.frameworks.torch.tensors.decorators.logging.LoggingTensor],
+                CODE[syft.frameworks.torch.tensors.decorators.loggingTensor.LoggingTensor],
                 (
                     lt.id,  # (int or str) id
                     msgpack.serde._simplify(

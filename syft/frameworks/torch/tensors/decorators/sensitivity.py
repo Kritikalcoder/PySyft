@@ -2,17 +2,20 @@ from syft.generic.tensor import AbstractTensor
 from syft.generic.frameworks.hook import hook_args
 from syft.generic.frameworks.overload import overloaded
 from syft.workers.abstract import AbstractWorker
+from syft.frameworks.torch.tensors.decorators.logging import LoggingTensor
 
 from torch.distributions import Laplace
 
 import syft as sy
 import torch as th
 
+
 def min_tensor(*tensors):
     tensors = list(tensors)
     for i in range(len(tensors)):
         tensors[i] = tensors[i].unsqueeze(0)
     return th.cat(tensors).min(0).values
+
 
 def max_tensor(*tensors):
     tensors = list(tensors)
@@ -22,7 +25,18 @@ def max_tensor(*tensors):
 
 
 class SensitivityTensor(AbstractTensor):
-    def __init__(self, accountant=None, l=None, h=None, el=None, eh=None, owner=None, id=None, tags=None, description=None):
+    def __init__(
+        self,
+        accountant=None,
+        l=None,
+        h=None,
+        el=None,
+        eh=None,
+        owner=None,
+        id=None,
+        tags=None,
+        description=None,
+    ):
         """Initializes a LoggingTensor, whose behaviour is to log all operations
         applied on it.
 
@@ -58,17 +72,22 @@ class SensitivityTensor(AbstractTensor):
         # TODO: account for exact value duplication.
         # x.expand(big_shape).publish() should cost the same as x.publish()
 
-
     @property
     def l_ex(self):
+        """
+        Taking l and matching it to the shape of e_l
+        """
         return self.l.unsqueeze(-1).expand(self.el.shape)
 
     @property
     def h_ex(self):
+        """
+        Taking h and matching it to the shape of e_h
+        """
         return self.h.unsqueeze(-1).expand(self.eh.shape)
 
     def __str__(self):
-        out = "SensitivityTensor>"+str(self.child) + "\n"
+        out = "SensitivityTensor>" + str(self.child) + "\n"
         out += "\ts:" + str(self.sensitivity) + "\n"
         out += "\tl:" + str(self.l) + "\n"
         out += "\th:" + str(self.h) + "\n"
@@ -86,9 +105,9 @@ class SensitivityTensor(AbstractTensor):
         """
         Here is the version of the add method without the decorator: as you can see
         it is much more complicated. However you might need sometimes to specify
-        some particular behaviour: so here what to start from :)
+        some particular behaviour: so here's what to start from :)
         """
-        # Replace all syft tensor with their child attribute
+        # Replace all syft tensors with their child attribute
         new_self, new_args, new_kwargs = hook_args.unwrap_args_from_method(
             "__add__", self, args, kwargs
         )
@@ -103,6 +122,7 @@ class SensitivityTensor(AbstractTensor):
 
         if isinstance(other, SensitivityTensor):
 
+            # private - private addition
             l = self.l + other.l
             h = self.h + other.h
             el = self.el + other.el
@@ -110,6 +130,7 @@ class SensitivityTensor(AbstractTensor):
 
         else:
 
+            # private - public addition
             l = self.l + other
             h = self.h + other
             el = self.el
@@ -125,9 +146,9 @@ class SensitivityTensor(AbstractTensor):
 
     def __sub__(self, *args, **kwargs):
         """
-        Here is the version of the add method without the decorator: as you can see
-        it is much more complicated. However you might need sometimes to specify
-        some particular behaviour: so here what to start from :)
+        Here is the version of the subtract method without the decorator: as you can see
+        it is much more complicated. However you might need sometime to specify
+        some particular behaviour: so here's what to start from :)
         """
         other = args[0]
 
@@ -150,7 +171,6 @@ class SensitivityTensor(AbstractTensor):
         # Put back SyftTensor on the tensors found in the response
         response = hook_args.hook_response("sum", response, wrap_type=type(self))
 
-
         l = self.l.sum(*args, **kwargs)
         h = self.h.sum(*args, **kwargs)
         el = self.el.sum(*args, **kwargs)
@@ -166,9 +186,9 @@ class SensitivityTensor(AbstractTensor):
 
     def __mul__(self, *args, **kwargs):
         """
-        Here is the version of the add method without the decorator: as you can see
-        it is much more complicated. However you might need sometimes to specify
-        some particular behaviour: so here what to start from :)
+        Here is the version of the product method without the decorator: as you can see
+        it is much more complicated. However you might need some time to specify
+        some particular behaviour: so here's what to start from :)
         """
         # Replace all syft tensor with their child attribute
         new_self, new_args, new_kwargs = hook_args.unwrap_args_from_method(
@@ -184,12 +204,25 @@ class SensitivityTensor(AbstractTensor):
         other = args[0]
 
         if isinstance(other, SensitivityTensor):
-
+            # private private multiplication
             l = min_tensor(self.h * other.l, self.l * other.h, self.l * other.l)
-            h = max_tensor(self.h * other.h, self.l * other.l)
+            h = max_tensor(self.h * other.h, self.l * other.l, self.h * other.l, self.l * other.h)
 
-            el = min_tensor(self.el * other.h_ex, self.l_ex * other.eh, self.eh * other.l_ex, self.h_ex * other.el, self.el * other.l_ex, self.l_ex * other.el)
-            eh = max_tensor(self.h_ex * other.eh, self.eh * other.h_ex, self.l_ex * other.el, self.el * other.h_ex)
+            el = min_tensor(
+                self.el * other.h_ex,  # done
+                self.l_ex * other.eh,  # done
+                self.eh * other.l_ex,  # done
+                self.h_ex * other.el,  # done
+                self.el * other.l_ex,
+                self.l_ex * other.el,
+            )
+
+            eh = max_tensor(
+                self.h_ex * other.eh,
+                self.eh * other.h_ex,
+                self.l_ex * other.el,
+                self.el * other.h_ex,
+            )
 
         else:
 
@@ -220,6 +253,7 @@ class SensitivityTensor(AbstractTensor):
 
         exponent = args[0]
 
+        # why is exponent even?
         assert exponent % 2 == 0
 
         l = self.l.pow(exponent)
@@ -277,11 +311,17 @@ class SensitivityTensor(AbstractTensor):
         return ((self - (self.mean(dim).unsqueeze(dim).expand(self.shape))) ** 2).mean(dim).sqrt()
 
     def __getitem__(self, *args, **kwargs):
-        return SensitivityTensor(self.accountant,
-                                 self.l.__getitem__(*args, **kwargs),
-                                 self.h.__getitem__(*args, **kwargs),
-                                 self.el.__getitem__(*args, **kwargs),
-                                 self.eh.__getitem__(*args, **kwargs)).on(self.child.__getitem__(*args, **kwargs)).child
+        return (
+            SensitivityTensor(
+                self.accountant,
+                self.l.__getitem__(*args, **kwargs),
+                self.h.__getitem__(*args, **kwargs),
+                self.el.__getitem__(*args, **kwargs),
+                self.eh.__getitem__(*args, **kwargs),
+            )
+            .on(self.child.__getitem__(*args, **kwargs))
+            .child
+        )
 
     def unsqueeze(self, *args, **kwargs):
         # Replace all syft tensor with their child attribute
@@ -295,7 +335,7 @@ class SensitivityTensor(AbstractTensor):
         # Put back SyftTensor on the tensors found in the response
         response = hook_args.hook_response("unsqueeze", response, wrap_type=type(self))
 
-        if(args[0] < 0):
+        if args[0] < 0:
             args[0] -= 1
 
         l = self.l.unsqueeze(*args, **kwargs)
@@ -341,8 +381,8 @@ class SensitivityTensor(AbstractTensor):
 
     def z_score(self, std=None, mean=None, epsilon=1):
 
-        if (std is None):
-            std = (self.std(0).publish(epsilon / 2).unsqueeze(0).expand(self.shape))
+        if std is None:
+            std = self.std(0).publish(epsilon / 2).unsqueeze(0).expand(self.shape)
             epsilon = epsilon / 2
 
         if mean is None:
@@ -352,11 +392,11 @@ class SensitivityTensor(AbstractTensor):
 
         num = self - mean.public_private(accountant=self.accountant).child
 
-        return (num * std_den)
+        return num * std_den
 
     @property
     def sensitivity(self):
-        if(self.eh is not None and self.el is not None):
+        if self.eh is not None and self.el is not None:
             return (self.eh - self.el).max(-1).values
         else:
             return self.child.unsqueeze(-1).expand(self.shape + (self.accountant.n_entities,))

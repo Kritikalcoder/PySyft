@@ -64,7 +64,7 @@ from syft.workers.websocket_client import WebsocketClientWorker
 from syft.workers.websocket_server import WebsocketServerWorker
 
 # Import Syft's Public Tensor Types
-from syft.frameworks.torch.tensors.decorators.logging import LoggingTensor
+from syft.frameworks.torch.tensors.Tensor import LoggingTensor
 from syft.frameworks.torch.tensors.interpreters.additive_shared import AdditiveSharingTensor
 from syft.frameworks.torch.tensors.interpreters.autograd import AutogradTensor
 from syft.frameworks.torch.tensors.interpreters.precision import FixedPrecisionTensor
